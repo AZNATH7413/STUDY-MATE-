@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Study AI — Tutor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .prose { white-space: pre-wrap; }
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div class="min-h-screen flex flex-col">
+    <header class="border-b bg-white">
+      <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <div class="bg-indigo-600 text-white rounded-lg px-2 py-1 text-sm font-semibold">Study AI</div>
+          <div class="text-sm text-gray-600">ChatGPT-style study assistant</div>
+        </div>
+        <div class="flex items-center gap-3">
+          <select id="provider" class="border rounded px-2 py-1 text-sm">
+            <option value="ollama">Ollama (local)</option>
+            <option value="openai">OpenAI</option>
+          </select>
+          <select id="mode" class="border rounded px-2 py-1 text-sm">
+            <option value="explain">Explain</option>
+            <option value="quiz">Quiz</option>
+          </select>
+          <button id="resetBtn" class="text-sm px-3 py-1 border rounded hover:bg-gray-100">Reset</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="flex-1">
+      <div id="chat" class="max-w-3xl mx-auto px-4 py-6 space-y-4 h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide">
+        <!-- Messages injected here -->
+      </div>
+    </main>
+
+    <footer class="border-t bg-white">
+      <div class="max-w-3xl mx-auto px-4 py-3">
+        <form id="composer" class="flex items-end gap-2">
+          <textarea id="input" rows="2" placeholder="Ask anything to study... (Shift+Enter for newline)" class="flex-1 border rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-indigo-500" ></textarea>
+          <button id="send" class="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700">Send</button>
+        </form>
+        <div id="hint" class="text-xs text-gray-500 mt-1">Provider and mode can be changed at the top. Responses stream in real time.</div>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="/static/main.js"></script>
+</body>
+</html>
