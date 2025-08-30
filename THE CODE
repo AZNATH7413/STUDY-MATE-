@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from typing import Dict, Iterable, Iterator, List, Optional
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ---------- Configuration helpers ----------
+
+def getenv(key: str, default: Optional[str] = None) -> Optional[str]:
+    val = os.getenv(key)
+    return val if val is not None and val != "" else default
+
+
+def detect_provider() -> str:
+    explicit = getenv("STUDY_AI_PROVIDER")
+    if explicit in {"openai", "ollama"}:
+        return explicit
+    # Default to OpenAI if key is present; else Ollama
+    if getenv("OPENAI_API_KEY"):
+        return "openai"
+    return "ollama"
+
+
+# ---------- Persona / system prompt ----------
+
+def system_prompt(mode: str = "explain") -> str:
+    base = (
+        "You are StudyGPT, a friendly, rigorous study coach. \n"
+        "Priorities: (1) accuracy, (2) clarity, (3) brevity. \n"
+        "Always reason step-by-step, check for misunderstandings, and adapt to the user's level. \n"
+        "Use simple language and concrete examples when helpful. \n"
+        "If the user asks about a graded problem, offer hints first and only give the full solution if they ask.\n"
+    )
+    if mode == "quiz":
+        base += (
+            "\nMode: QUIZ. Ask one question at a time, wait for the student's answer, then provide concise feedback, the correct answer, and a short explanation. "
+            "Adjust difficulty gradually and keep a supportive tone."
+        )
+    else:
+        base += (
+            "\nMode: EXPLAIN. Provide concise, step-by-step explanations and ask brief check-for-understanding questions."
+        )
+    return base
+
+
+# ---------- Streaming clients ----------
+
+class OpenAIStreamer:
+    def __init__(self, model: str, api_key: str, temperature: float = 0.2):
+        self.model = model
+        self.api_key = api_key
+        self.temperature = temperature
+
+    def stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "stream": True,
+        }
+        with requests.post(url, headers=headers, json=payload, stream=True, timeout=600) as r:
+            if r.status_code == 401:
+                raise RuntimeError("OpenAI auth failed (401). Ensure OPENAI_API_KEY is set.")
+            if r.status_code == 429:
+                raise RuntimeError("OpenAI rate limit (429). Try again shortly.")
+            r.raise_for_status()
+            for raw in r.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                if raw.startswith("data: "):
+                    data = raw[len("data: "):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = obj.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        yield content
+
+
+class OllamaStreamer:
+    def __init__(self, model: str, host: str = "http://localhost:11434", temperature: float = 0.2):
+        self.model = model
+        self.host = host.rstrip("/")
+        self.temperature = temperature
+
+    def stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
+        url = f"{self.host}/api/chat"
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": self.temperature},
+        }
+        headers = {"Content-Type": "application/json"}
+        with requests.post(url, headers=headers, json=payload, stream=True, timeout=600) as r:
+            if r.status_code == 404:
+                raise RuntimeError("Ollama endpoint not found. Is Ollama running?")
+            r.raise_for_status()
+            for raw in r.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                # Ollama streams with either 'response' or nested 'message.content'
+                piece = obj.get("response")
+                if not piece:
+                    msg = obj.get("message", {})
+                    piece = msg.get("content")
+                if piece:
+                    yield piece
+                if obj.get("done"):
+                    break
+
+
+# ---------- CLI app ----------
+
+HELP_TEXT = (
+    "Commands:\n"
+    "  /help                Show this help\n"
+    "  /mode explain|quiz   Switch tutoring mode\n"
+    "  /provider openai|ollama  Switch backend provider\n"
+    "  /reset               Clear conversation history\n"
+    "  /exit                Quit\n"
+)
+
+
+def print_banner(provider: str, mode: str, openai_model: str, ollama_model: str) -> None:
+    print("\nStudy AI — ChatGPT-style study assistant (CLI)\n")
+    print(f"Provider: {provider}    Mode: {mode}")
+    if provider == "openai":
+        print(f"OpenAI model: {openai_model}")
+        if not getenv("OPENAI_API_KEY"):
+            print("WARNING: OPENAI_API_KEY not set; switch to Ollama or set the key.")
+    else:
+        host = getenv("OLLAMA_HOST", "http://localhost:11434")
+        print(f"Ollama model: {ollama_model}   Host: {host}")
+    print("\nType /help for commands. Start chatting below.\n")
+
+
+def main() -> int:
+    provider = detect_provider()
+    mode = "explain"
+
+    openai_model = getenv("STUDY_AI_OPENAI_MODEL", "gpt-4o-mini")
+    openai_key = getenv("OPENAI_API_KEY")
+    ollama_model = getenv("STUDY_AI_OLLAMA_MODEL", "llama3.1:8b")
+    ollama_host = getenv("OLLAMA_HOST", "http://localhost:11434")
+
+    openai_client = OpenAIStreamer(openai_model, openai_key) if openai_key else None
+    ollama_client = OllamaStreamer(ollama_model, host=ollama_host)
+
+    msgs: List[Dict[str, str]] = [{"role": "system", "content": system_prompt(mode)}]
+
+    def ensure_client(pvd: str):
+        if pvd == "openai":
+            if not openai_key:
+                raise RuntimeError("OPENAI_API_KEY is not set. Either set it or switch to Ollama with /provider ollama.")
+            return openai_client
+        return ollama_client
+
+    print_banner(provider, mode, openai_model, ollama_model)
+
+    while True:
+        try:
+            user = input("You > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            return 0
+
+        if not user:
+            continue
+
+        if user.startswith("/"):
+            parts = user.split()
+            cmd = parts[0].lower()
+            arg = parts[1].lower() if len(parts) > 1 else None
+
+            if cmd == "/help":
+                print(HELP_TEXT)
+                continue
+            if cmd == "/exit":
+                print("Bye!")
+                return 0
+            if cmd == "/reset":
+                msgs = [{"role": "system", "content": system_prompt(mode)}]
+                print("Conversation reset.")
+                continue
+            if cmd == "/mode":
+                if arg in {"explain", "quiz"}:
+                    mode = arg
+                    msgs = [{"role": "system", "content": system_prompt(mode)}]
+                    print(f"Mode set to {mode} and conversation reset.")
+                else:
+                    print("Usage: /mode explain|quiz")
+                continue
+            if cmd == "/provider":
+                if arg in {"openai", "ollama"}:
+                    provider = arg
+                    print(f"Provider set to {provider}.")
+                else:
+                    print("Usage: /provider openai|ollama")
+                continue
+            print("Unknown command. Type /help.")
+            continue
+
+        # Regular chat turn
+        msgs.append({"role": "user", "content": user})
+        try:
+            client = ensure_client(provider)
+            if provider == "openai":
+                stream = client.stream(msgs)
+            else:
+                stream = client.stream(msgs)
+
+            print("Tutor > ", end="", flush=True)
+            assistant_text_chunks: List[str] = []
+            for piece in stream:
+                assistant_text_chunks.append(piece)
+                print(piece, end="", flush=True)
+            print("", flush=True)
+            assistant_full = "".join(assistant_text_chunks)
+            msgs.append({"role": "assistant", "content": assistant_full})
+        except Exception as e:
+            print(f"\n[Error] {e}")
+            # Roll back the last user message so they can retry or switch providers
+            if msgs and msgs[-1].get("role") == "user":
+                msgs.pop()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted. Bye!")
+        sys.exit(130)
