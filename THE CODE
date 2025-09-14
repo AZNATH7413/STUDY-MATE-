@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---------- Configuration helpers ----------
+# ---------- Configuration helpers ---------
 
 def getenv(key: str, default: Optional[str] = None) -> Optional[str]:
     val = os.getenv(key)
